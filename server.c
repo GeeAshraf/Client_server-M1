@@ -6,7 +6,7 @@
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
-#define PSK "secure123"
+#define PSK "ganna_be_secure"
 
 void xor_encrypt_decrypt(char *data, int len) {
     int key_len = strlen(PSK);
@@ -34,7 +34,7 @@ int main() {
 
     new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen);
 
-    /* AUTHENTICATION */
+    //auth
 
     char client_key[BUFFER_SIZE] = {0};
     int key_len = read(new_socket, client_key, BUFFER_SIZE);
@@ -51,7 +51,7 @@ int main() {
     send(new_socket, "AUTH_OK", 7, 0);
     printf("Client authenticated successfully\n");
 
-    /* RECEIVE ENCRYPTED MESSAGE */
+    //recieve encrypt msg
 
     int bytes = read(new_socket, buffer, BUFFER_SIZE);
 
@@ -59,7 +59,7 @@ int main() {
 
     printf("Decrypted client message: %.*s\n", bytes, buffer);
 
-    /* SEND ENCRYPTED RESPONSE */
+    //send encrypted response
 
     char response[] = "Hello from secure server";
     int len = strlen(response);

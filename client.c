@@ -6,7 +6,7 @@
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
-#define PSK "secure123"
+#define PSK "ganna_be_secure"
 
 void xor_encrypt_decrypt(char *data, int len) {
     int key_len = strlen(PSK);
