@@ -13,6 +13,11 @@
 // AES key (16 bytes = 128-bit)
 unsigned char aes_key[16] = "ganna_securekey";
 
+//clobal client counter
+int client_count = 0;
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+
 // AES Encrypt
 void aes_encrypt(unsigned char *input, unsigned char *output) {
     AES_KEY enc_key;
@@ -27,10 +32,19 @@ void aes_decrypt(unsigned char *input, unsigned char *output) {
     AES_decrypt(input, output, &dec_key);
 }
 
+
 // Thread function
 void *handle_client(void *socket_desc) {
     int new_socket = *(int*)socket_desc;
     free(socket_desc);
+
+    //assigning new clnt id
+    pthread_mutex_lock(&lock);
+    client_count++;
+    int id = client_count;
+    pthread_mutex_unlock(&lock);
+
+    printf("Client %d connected\n", id);
 
     unsigned char buffer[16] = {0};
     unsigned char decrypted[16] = {0};
@@ -47,19 +61,45 @@ void *handle_client(void *socket_desc) {
     }
 
     send(new_socket, "AUTH_OK", 7, 0);
-    printf("Client authenticated\n");
+    printf("Client %d authenticated\n", id);
 
     // RECEIVE encrypted message
     read(new_socket, buffer, 16);
-
     aes_decrypt(buffer, decrypted);
-    printf("Client: %s\n", decrypted);
 
-    // SEND encrypted response
-    unsigned char response[16] = "Hello client!!";
+    //make each client prints different msg
+    if (id == 1) {
+        printf("Client 1 says: %s\n", decrypted);
+    } 
+    else if (id == 2) {
+        printf("Client 2 says: %s\n", decrypted);
+    } 
+    else if (id == 3) {
+        printf("Client 3 says: %s\n", decrypted);
+    } 
+    else {
+        printf("Client %d says: %s\n", id, decrypted);
+    }
+
+    //make each client reply with different msgs
+    unsigned char response[16] = {0};
+
+    if (id == 1) {
+        memcpy(response, "Hi Client 1!!!", 16);
+    } 
+    else if (id == 2) {
+        memcpy(response, "Hello Client 2!", 16);
+    } 
+    else if (id == 3) {
+        memcpy(response, "Welcome Clnt 3", 16);
+    } 
+    else {
+        memcpy(response, "Hello client!!", 16);
+    }
+
     unsigned char encrypted[16] = {0};
-
     aes_encrypt(response, encrypted);
+
     send(new_socket, encrypted, 16, 0);
 
     close(new_socket);
