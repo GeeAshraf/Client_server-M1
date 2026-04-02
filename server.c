@@ -10,7 +10,7 @@
 #define BUFFER_SIZE 1024
 #define PSK "ganna_be_secure"
 
-// AES key (16 bytes = 128-bit)
+// AES key setting 16 bit
 unsigned char aes_key[16] = "ganna_securekey";
 
 //clobal client counter
@@ -18,14 +18,14 @@ int client_count = 0;
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 
-// AES Encrypt
+// AES encrypt
 void aes_encrypt(unsigned char *input, unsigned char *output) {
     AES_KEY enc_key;
     AES_set_encrypt_key(aes_key, 128, &enc_key);
     AES_encrypt(input, output, &enc_key);
 }
 
-// AES Decrypt
+// AES decrypt
 void aes_decrypt(unsigned char *input, unsigned char *output) {
     AES_KEY dec_key;
     AES_set_decrypt_key(aes_key, 128, &dec_key);
@@ -63,7 +63,7 @@ void *handle_client(void *socket_desc) {
     send(new_socket, "AUTH_OK", 7, 0);
     printf("Client %d authenticated\n", id);
 
-    // RECEIVE encrypted message
+    // RECEIVE encrypted msg
     read(new_socket, buffer, 16);
     aes_decrypt(buffer, decrypted);
 
