@@ -92,7 +92,7 @@ void upload_file(int sock, char *filename) {
     printf("%s", response);
 }
 
-// write (FIXED)
+// write 
 void write_file(int sock, char *filename) {
 
     char response[200];
@@ -117,12 +117,15 @@ void write_file(int sock, char *filename) {
         // remove newline
         line[strcspn(line, "\r\n")] = 0;
 
-        // FIX: clean END detection
+        // detect END
         if (strcmp(line, "END") == 0)
             break;
 
-        // store with newline again
-        snprintf(lines[count], BUF, "%s\n", line);
+        // safe copy + newline
+        strncpy(lines[count], line, BUF - 2);
+        lines[count][BUF - 2] = '\0';
+        strcat(lines[count], "\n");
+
         count++;
     }
 
@@ -228,6 +231,10 @@ int main() {
         else if (!strcmp(command,"write")) {
             send_msg(sock,cmd);
             write_file(sock,arg);
+
+            // clear leftover input
+            int c;
+            while ((c = getchar()) != '\n' && c != EOF);
         }
 
         else {

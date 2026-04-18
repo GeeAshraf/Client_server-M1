@@ -187,8 +187,7 @@ int do_upload(int sock, char *arg) {
     send_msg(sock, "UPLOAD DONE\n");
     return 0;
 }
-
-// write (FIXED PROTOCOL)
+//write
 int do_write(int sock, char *file) {
 
     if (!safe_path(file)) {
@@ -204,8 +203,16 @@ int do_write(int sock, char *file) {
 
     send_msg(sock, "START EDITING (END to finish)\n");
 
-    int count;
+    int count = 0;
+
+    // receive number of lines
     if (recv(sock, &count, sizeof(int), 0) <= 0) {
+        fclose(fp);
+        return -1;
+    }
+
+    //validate count
+    if (count < 0 || count > 1000) {
         fclose(fp);
         return -1;
     }
@@ -213,10 +220,14 @@ int do_write(int sock, char *file) {
     char buf[BUF];
 
     for (int i = 0; i < count; i++) {
-        if (recv_msg(sock, buf, sizeof(buf)) <= 0)
-            break;
 
-        fprintf(fp, "%s", buf);
+        int r = recv_msg(sock, buf, sizeof(buf));
+        if (r <= 0) {
+            fclose(fp);
+            return -1;
+        }
+
+        fwrite(buf, 1, r, fp);  
     }
 
     fclose(fp);
@@ -226,7 +237,7 @@ int do_write(int sock, char *file) {
     return 0;
 }
 
-// command
+//command exec
 int execute_command(char *cmd, char *res, int size, level_t lvl) {
 
     char c[50]={0}, a[200]={0}, a2[200]={0};
@@ -267,7 +278,7 @@ int execute_command(char *cmd, char *res, int size, level_t lvl) {
     return 0;
 }
 
-// thread
+//thread
 void *client_thread(void *arg) {
     int sock = *(int*)arg;
     free(arg);
@@ -312,7 +323,7 @@ void *client_thread(void *arg) {
     return NULL;
 }
 
-// main
+//main
 int main() {
     int s=socket(AF_INET,SOCK_STREAM,0);
     int opt=1;
