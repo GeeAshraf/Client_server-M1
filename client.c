@@ -3,72 +3,244 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <openssl/aes.h>
 
 #define PORT 8080
-#define BUFFER_SIZE 1024
-#define PSK "ganna_be_secure"
+#define BUF 4096
 
-// AES key (same as server)
-unsigned char aes_key[16] = "ganna_securekey";
-
-// AES encrypt
-void aes_encrypt(unsigned char *input, unsigned char *output) {
-    AES_KEY enc_key;
-    AES_set_encrypt_key(aes_key, 128, &enc_key);
-    AES_encrypt(input, output, &enc_key);
+// send
+void send_msg(int sock, const char *msg) {
+    int len = strlen(msg);
+    send(sock, &len, sizeof(int), 0);
+    send(sock, msg, len, 0);
 }
 
-// AES decrypt
-void aes_decrypt(unsigned char *input, unsigned char *output) {
-    AES_KEY dec_key;
-    AES_set_decrypt_key(aes_key, 128, &dec_key);
-    AES_decrypt(input, output, &dec_key);
+// recv
+int recv_msg(int sock, char *buf, int size) {
+    int len = 0;
+
+    if (recv(sock, &len, sizeof(int), 0) <= 0)
+        return -1;
+
+    if (len <= 0 || len >= size)
+        return -1;
+
+    int total = 0;
+    while (total < len) {
+        int n = recv(sock, buf + total, len - total, 0);
+        if (n <= 0) return -1;
+        total += n;
+    }
+
+    buf[len] = 0;
+    return len;
 }
 
+// download
+void download_file(int sock, char *filename) {
+    FILE *fp = fopen(filename, "wb");
+    if (!fp) {
+        printf("Cannot create file\n");
+        return;
+    }
+
+    int n;
+    char buffer[BUF];
+
+    while (1) {
+        if (recv(sock, &n, sizeof(int), 0) <= 0)
+            break;
+
+        if (n == 0) break;
+
+        int total = 0;
+        while (total < n) {
+            int r = recv(sock, buffer + total, n - total, 0);
+            total += r;
+        }
+
+        fwrite(buffer, 1, n, fp);
+    }
+
+    fclose(fp);
+    printf("Download complete\n");
+}
+
+// upload
+void upload_file(int sock, char *filename) {
+
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) {
+        printf("File not found on client side\n");
+        return;
+    }
+
+    char buffer[BUF];
+    int n;
+
+    while ((n = fread(buffer, 1, BUF, fp)) > 0) {
+        send(sock, &n, sizeof(int), 0);
+        send(sock, buffer, n, 0);
+    }
+
+    n = 0;
+    send(sock, &n, sizeof(int), 0);
+
+    fclose(fp);
+
+    char response[100];
+    recv_msg(sock, response, sizeof(response));
+    printf("%s", response);
+}
+
+// write (FIXED)
+void write_file(int sock, char *filename) {
+
+    char response[200];
+
+    if (recv_msg(sock, response, sizeof(response)) <= 0)
+        return;
+
+    printf("%s", response);
+
+    char lines[100][BUF];
+    char line[BUF];
+    int count = 0;
+
+    while (count < 100) {
+
+        printf("> ");
+        fflush(stdout);
+
+        if (!fgets(line, BUF, stdin))
+            break;
+
+        // remove newline
+        line[strcspn(line, "\r\n")] = 0;
+
+        // FIX: clean END detection
+        if (strcmp(line, "END") == 0)
+            break;
+
+        // store with newline again
+        snprintf(lines[count], BUF, "%s\n", line);
+        count++;
+    }
+
+    // send count
+    send(sock, &count, sizeof(int), 0);
+
+    // send lines
+    for (int i = 0; i < count; i++) {
+        send_msg(sock, lines[i]);
+    }
+
+    // receive done
+    if (recv_msg(sock, response, sizeof(response)) > 0)
+        printf("%s", response);
+}
+
+// main
 int main() {
 
-    int sock;
-    struct sockaddr_in server_address;
-    char buffer[BUFFER_SIZE] = {0};
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
 
-    sock = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in server;
+    server.sin_family = AF_INET;
+    server.sin_port = htons(PORT);
+    server.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    server_address.sin_family = AF_INET;
-    server_address.sin_port = htons(PORT);
-    server_address.sin_addr.s_addr = INADDR_ANY;
+    if (connect(sock, (struct sockaddr*)&server, sizeof(server)) < 0) {
+        perror("connect");
+        return 1;
+    }
 
-    connect(sock, (struct sockaddr*)&server_address, sizeof(server_address));
+    printf("Connected to server\n");
 
-    // AUTH
-    send(sock, PSK, strlen(PSK), 0);
+    char user[50], pass[50];
 
-    int bytes = read(sock, buffer, BUFFER_SIZE);
-    buffer[bytes] = '\0';
+    printf("Username: ");
+    scanf("%49s", user);
 
-    if (strcmp(buffer, "AUTH_OK") != 0) {
+    printf("Password: ");
+    scanf("%49s", pass);
+
+    char credentials[120];
+    snprintf(credentials, sizeof(credentials), "%s %s", user, pass);
+    send_msg(sock, credentials);
+
+    char response[100];
+
+    if (recv_msg(sock, response, sizeof(response)) <= 0)
+        return 1;
+
+    if (strcmp(response, "FAIL") == 0) {
         printf("Authentication failed\n");
-        close(sock);
         return 0;
     }
 
-    printf("Authentication successful\n");
+    printf("Authenticated\n");
 
-    // SEND encrypted msg (16 bytes block)
-    unsigned char message[16] = "Hello server!!";
-    unsigned char encrypted[16] = {0};
+    if (recv_msg(sock, response, sizeof(response)) <= 0)
+        return 1;
 
-    aes_encrypt(message, encrypted);
-    send(sock, encrypted, 16, 0);
+    printf("Your role: %s\n", response);
 
-    // RECEIVE encrypted response
-    unsigned char response[16] = {0};
-    unsigned char decrypted[16] = {0};
+    getchar(); // clear newline
 
-    read(sock, response, 16);
-    aes_decrypt(response, decrypted);
+    // command loop
+    while (1) {
 
-    printf("Server: %s\n", decrypted);
+        char cmd[BUF];
+        char result[BUF];
+
+        printf(">> ");
+        fflush(stdout);
+
+        if (!fgets(cmd, sizeof(cmd), stdin))
+            break;
+
+        // clean input
+        cmd[strcspn(cmd, "\r\n")] = 0;
+        if (strlen(cmd) == 0)
+            continue;
+
+        char command[50]={0}, arg[200]={0};
+        sscanf(cmd,"%49s %199s",command,arg);
+
+        if (!strcmp(command,"upload")) {
+
+            FILE *fp=fopen(arg,"rb");
+            if(!fp){
+                printf("File not found on client side\n");
+                continue;
+            }
+            fclose(fp);
+
+            send_msg(sock,cmd);
+            upload_file(sock,arg);
+        }
+
+        else if (!strcmp(command,"download")) {
+            send_msg(sock,cmd);
+            download_file(sock,arg);
+        }
+
+        else if (!strcmp(command,"write")) {
+            send_msg(sock,cmd);
+            write_file(sock,arg);
+        }
+
+        else {
+            send_msg(sock,cmd);
+
+            if (recv_msg(sock,result,sizeof(result))<=0) {
+                printf("Server disconnected\n");
+                break;
+            }
+
+            printf("%s\n",result);
+        }
+    }
 
     close(sock);
     return 0;
