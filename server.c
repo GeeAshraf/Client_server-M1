@@ -4,53 +4,84 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <pthread.h>
-#include <sys/time.h>
+#include <time.h>
+#include <openssl/evp.h>
 
 #define PORT 8080
 #define BUF 4096
-#define TIMEOUT_SEC 300
 
 typedef enum { ENTRY, MEDIUM, TOP } level_t;
 
-// safe path
-int safe_path(char *arg) {
-    return !(strstr(arg, "..") || arg[0] == '/');
+unsigned char KEY[32] = "01234567890123456789012345678901";
+unsigned char IV[16]  = "0123456789012345";
+
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+//AES
+int encrypt(unsigned char *p, int len, unsigned char *c) {
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    int l, cl;
+    EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, KEY, IV);
+    EVP_EncryptUpdate(ctx, c, &l, p, len); cl = l;
+    EVP_EncryptFinal_ex(ctx, c + l, &l); cl += l;
+    EVP_CIPHER_CTX_free(ctx);
+    return cl;
 }
 
-// recv
-int recv_msg(int sock, char *buf, int size) {
-    int len = 0;
-    if (recv(sock, &len, sizeof(int), 0) <= 0) return -1;
-    if (len <= 0 || len >= size) return -1;
-
-    int total = 0;
-    while (total < len) {
-        int n = recv(sock, buf + total, len - total, 0);
-        if (n <= 0) return -1;
-        total += n;
-    }
-    buf[len] = 0;
-    return len;
+int decrypt(unsigned char *c, int len, unsigned char *p) {
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    int l, pl;
+    EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, KEY, IV);
+    EVP_DecryptUpdate(ctx, p, &l, c, len); pl = l;
+    EVP_DecryptFinal_ex(ctx, p + l, &l); pl += l;
+    EVP_CIPHER_CTX_free(ctx);
+    return pl;
 }
 
-// send
-int send_msg(int sock, const char *buf) {
-    int len = strlen(buf);
+// soc logging
+void log_event(const char *type, const char *user, const char *lvl, const char *msg) {
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    char ts[64];
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", t);
+
+    pthread_mutex_lock(&lock);
+    printf("[%s] [%-5s] [%s@%-6s] %s\n", ts, type, user, lvl, msg);
+    pthread_mutex_unlock(&lock);
+}
+//communication
+void send_msg(int sock, const char *msg) {
+    unsigned char enc[BUF];
+    int len = encrypt((unsigned char*)msg, strlen(msg), enc);
     send(sock, &len, sizeof(int), 0);
-    return send(sock, buf, len, 0);
+    send(sock, enc, len, 0);
 }
 
-// auth
-int authenticate(char *user, char *pass, level_t *lvl) {
-    FILE *f = fopen("./users.txt", "r");
+int recv_msg(int sock, char *buf) {
+    int len;
+    if (recv(sock, &len, sizeof(int), 0) <= 0) return -1;
+    unsigned char enc[BUF], dec[BUF];
+    int t = 0;
+    while (t < len) {
+        int r = recv(sock, enc + t, len - t, 0);
+        if (r <= 0) return -1;
+        t += r;
+    }
+    int dl = decrypt(enc, len, dec);
+    dec[dl] = 0;
+    memcpy(buf, dec, dl + 1);
+    return dl;
+}
+
+//auth
+int authenticate(char *u, char *p, level_t *lvl) {
+    FILE *f = fopen("users.txt", "r");
     if (!f) return 0;
-
-    char u[50], p[50], role[20];
-
-    while (fscanf(f, "%49s %49s %19s", u, p, role) == 3) {
-        if (!strcmp(user, u) && !strcmp(pass, p)) {
-            if (!strcmp(role, "entry")) *lvl = ENTRY;
-            else if (!strcmp(role, "medium")) *lvl = MEDIUM;
+    char U[50], P[50], R[20];
+    while (fscanf(f, "%s %s %s", U, P, R) == 3) {
+        if (!strcmp(u, U) && !strcmp(p, P)) {
+            if (!strcmp(R, "entry")) *lvl = ENTRY;
+            else if (!strcmp(R, "medium")) *lvl = MEDIUM;
             else *lvl = TOP;
             fclose(f);
             return 1;
@@ -60,293 +91,168 @@ int authenticate(char *user, char *pass, level_t *lvl) {
     return 0;
 }
 
-// ls
-int do_ls(char *res, int size) {
-    FILE *fp = popen("ls", "r");
-    int n = fread(res, 1, size - 1, fp);
-    res[n] = 0;
-    pclose(fp);
-    return strlen(res);
-}
-
-// cat
-int do_cat(char *arg, char *res, int size) {
-    if (!safe_path(arg)) return sprintf(res, "INVALID PATH\n");
-
-    FILE *fp = fopen(arg, "r");
-    if (!fp) return sprintf(res, "FILE NOT FOUND\n");
-
-    int n = fread(res, 1, size - 1, fp);
-    res[n] = 0;
-    fclose(fp);
-    return strlen(res);
-}
-
-// rm
-int do_rm(char *arg, char *res) {
-    if (!safe_path(arg)) return sprintf(res, "INVALID PATH\n");
-
-    return (remove(arg) == 0) ?
-        sprintf(res, "FILE DELETED\n") :
-        sprintf(res, "DELETE FAILED\n");
-}
-
-// cp
-int do_cp(char *src, char *dst, char *res) {
-    if (!safe_path(src) || !safe_path(dst))
-        return sprintf(res, "INVALID PATH\n");
-
-    FILE *f1 = fopen(src, "rb");
-    if (!f1) return sprintf(res, "SOURCE NOT FOUND\n");
-
-    FILE *f2 = fopen(dst, "wb");
-    if (!f2) {
-        fclose(f1);
-        return sprintf(res, "CANNOT CREATE DEST\n");
-    }
-
-    char buf[BUF];
-    int n;
-    while ((n = fread(buf, 1, BUF, f1)) > 0)
-        fwrite(buf, 1, n, f2);
-
-    fclose(f1);
-    fclose(f2);
-    return sprintf(res, "COPY DONE\n");
-}
-
-// download
-int do_download(int sock, char *arg) {
-    if (!safe_path(arg)) {
-        send_msg(sock, "INVALID PATH");
-        return -1;
-    }
-
-    FILE *fp = fopen(arg, "rb");
-    if (!fp) {
-        send_msg(sock, "FILE NOT FOUND");
-        return -1;
-    }
-
-    char buf[BUF];
-    int n;
-
-    while ((n = fread(buf, 1, BUF, fp)) > 0) {
-        send(sock, &n, sizeof(int), 0);
-        send(sock, buf, n, 0);
-    }
-
-    n = 0;
-    send(sock, &n, sizeof(int), 0);
-
-    fclose(fp);
-    return 0;
-}
-
-// upload
-int do_upload(int sock, char *arg) {
-
-    if (!safe_path(arg)) {
-        send_msg(sock, "INVALID PATH");
-        return -1;
-    }
-
-    int n;
-    if (recv(sock, &n, sizeof(int), 0) <= 0)
-        return -1;
-
-    if (n == 0)
-        return -1;
-
-    FILE *fp = fopen(arg, "wb");
-    if (!fp) {
-        send_msg(sock, "CANNOT CREATE FILE");
-        return -1;
-    }
-
-    char buffer[BUF];
-
-    while (1) {
-        int total = 0;
-
-        while (total < n) {
-            int r = recv(sock, buffer + total, n - total, 0);
-            if (r <= 0) break;
-            total += r;
-        }
-
-        fwrite(buffer, 1, n, fp);
-
-        if (recv(sock, &n, sizeof(int), 0) <= 0)
-            break;
-
-        if (n == 0) break;
-    }
-
-    fclose(fp);
-    send_msg(sock, "UPLOAD DONE\n");
-    return 0;
-}
-//write
-int do_write(int sock, char *file) {
-
-    if (!safe_path(file)) {
-        send_msg(sock, "INVALID PATH\n");
-        return -1;
-    }
-
-    FILE *fp = fopen(file, "w");
-    if (!fp) {
-        send_msg(sock, "CANNOT OPEN FILE\n");
-        return -1;
-    }
-
-    send_msg(sock, "START EDITING (END to finish)\n");
-
-    int count = 0;
-
-    // receive number of lines
-    if (recv(sock, &count, sizeof(int), 0) <= 0) {
-        fclose(fp);
-        return -1;
-    }
-
-    //validate count
-    if (count < 0 || count > 1000) {
-        fclose(fp);
-        return -1;
-    }
-
-    char buf[BUF];
-
-    for (int i = 0; i < count; i++) {
-
-        int r = recv_msg(sock, buf, sizeof(buf));
-        if (r <= 0) {
-            fclose(fp);
-            return -1;
-        }
-
-        fwrite(buf, 1, r, fp);  
-    }
-
-    fclose(fp);
-
-    send_msg(sock, "WRITE DONE\n");
-
-    return 0;
-}
-
-//command exec
-int execute_command(char *cmd, char *res, int size, level_t lvl) {
-
-    char c[50]={0}, a[200]={0}, a2[200]={0};
-    sscanf(cmd, "%49s %199s %199s", c, a, a2);
-
-    if (!strcmp(c,"help")) {
-        if (lvl==ENTRY) return sprintf(res,"ls, cat\n");
-        if (lvl==MEDIUM) return sprintf(res,"ls, cat, whoami, cp, write\n");
-        return sprintf(res,"ALL COMMANDS\n");
-    }
-
-    if (lvl==ENTRY) {
-        if (!strcmp(c,"ls")) return do_ls(res,size);
-        if (!strcmp(c,"cat")) return do_cat(a,res,size);
-        return sprintf(res,"ACCESS DENIED\n");
-    }
-
-    if (lvl==MEDIUM) {
-        if (!strcmp(c,"ls")) return do_ls(res,size);
-        if (!strcmp(c,"cat")) return do_cat(a,res,size);
-        if (!strcmp(c,"whoami")) return sprintf(res,"MEDIUM\n");
-        if (!strcmp(c,"cp")) return do_cp(a,a2,res);
-        if (!strcmp(c,"write")) return -4;
-        return sprintf(res,"ACCESS DENIED\n");
-    }
-
-    if (lvl==TOP) {
-        if (!strcmp(c,"ls")) return do_ls(res,size);
-        if (!strcmp(c,"cat")) return do_cat(a,res,size);
-        if (!strcmp(c,"whoami")) return sprintf(res,"TOP\n");
-        if (!strcmp(c,"rm")) return do_rm(a,res);
-        if (!strcmp(c,"download")) return -2;
-        if (!strcmp(c,"upload")) return -3;
-        if (!strcmp(c,"write")) return -4;
-        return sprintf(res,"OK\n");
-    }
-
-    return 0;
-}
-
-//thread
+//client thread
 void *client_thread(void *arg) {
-    int sock = *(int*)arg;
-    free(arg);
-
-    char buf[BUF], user[50], pass[50];
+    int sock = *(int*)arg; free(arg);
+    char buf[BUF], user[50] = "UNKNOWN", pass[50];
     level_t lvl;
 
-    struct timeval tv = {TIMEOUT_SEC,0};
-    setsockopt(sock,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(tv));
+    if (recv_msg(sock, buf) <= 0) { close(sock); return NULL; }
+    sscanf(buf, "%s %s", user, pass);
 
-    if (recv_msg(sock,buf,sizeof(buf))<=0) { close(sock); return NULL; }
-
-    sscanf(buf,"%s %s",user,pass);
-    printf("Login: %s\n",user);
-
-    if (!authenticate(user,pass,&lvl)) {
-        send_msg(sock,"FAIL");
+    if (!authenticate(user, pass, &lvl)) {
+        log_event("WARN", user, "NONE", "AUTH_FAILED");
+        send_msg(sock, "FAIL");
         close(sock);
         return NULL;
     }
 
-    printf("%s logged in\n", user);
-
-    send_msg(sock,"AUTH_OK");
-    send_msg(sock,(lvl==ENTRY)?"ENTRY":(lvl==MEDIUM)?"MEDIUM":"TOP");
+    char *L = (lvl == ENTRY) ? "ENTRY" : (lvl == MEDIUM) ? "MEDIUM" : "TOP";
+    log_event("INFO", user, L, "SESSION_START");
+    send_msg(sock, "AUTH_OK");
+    send_msg(sock, L);
 
     while (1) {
-        char cmd[BUF], res[BUF];
+        char cmd[BUF], res[BUF] = {0};
+        if (recv_msg(sock, cmd) <= 0) break;
 
-        if (recv_msg(sock,cmd,sizeof(cmd))<=0) break;
+        
+        if (!strcmp(cmd, "exit")) {
+            log_event("INFO", user, L, "SESSION_END");
+            break; 
+        }
 
-        int st = execute_command(cmd,res,sizeof(res),lvl);
+        char logmsg[BUF];
+        snprintf(logmsg, sizeof(logmsg), "EXECUTE: %s", cmd);
+        log_event("CMD", user, L, logmsg);
 
-        if (st==-2) { char a[200]; sscanf(cmd,"%*s %s",a); do_download(sock,a); }
-        else if (st==-3){ char a[200]; sscanf(cmd,"%*s %s",a); do_upload(sock,a); }
-        else if (st==-4){ char a[200]; sscanf(cmd,"%*s %s",a); do_write(sock,a); }
-        else send_msg(sock,res);
+        char c[50] = {0}, a[200] = {0}, a2[200] = {0};
+        sscanf(cmd, "%s %s %s", c, a, a2);
+
+        //role logic
+        if (lvl == ENTRY) {
+            if (!strcmp(c, "ls")) {
+                FILE *fp = popen("ls", "r");
+                fread(res, 1, BUF - 1, fp);
+                pclose(fp);
+            } else if (!strcmp(c, "cat")) {
+                FILE *fp = fopen(a, "r");
+                if (!fp) strcpy(res, "File not found\n");
+                else { fread(res, 1, BUF - 1, fp); fclose(fp); }
+            } else {
+                strcpy(res, "ACCESS DENIED\n");
+            }
+            send_msg(sock, res);
+        } 
+        else if (lvl == MEDIUM) {
+            if (!strcmp(c, "ls") || !strcmp(c, "cat")) {
+                char shell_cmd[BUF];
+                snprintf(shell_cmd, sizeof(shell_cmd), "%s 2>&1", cmd);
+                FILE *fp = popen(shell_cmd, "r");
+                fread(res, 1, BUF - 1, fp);
+                pclose(fp);
+                send_msg(sock, res);
+            } else if (!strcmp(c, "cp")) {
+                FILE *f1 = fopen(a, "rb"), *f2 = fopen(a2, "wb");
+                if (!f1 || !f2) strcpy(res, "Copy Error\n");
+                else {
+                    char b[BUF]; int n;
+                    while ((n = fread(b, 1, BUF, f1)) > 0) fwrite(b, 1, n, f2);
+                    fclose(f1); fclose(f2);
+                    strcpy(res, "COPY DONE\n");
+                }
+                send_msg(sock, res);
+            } else if (!strcmp(c, "write")) {
+                FILE *fp = fopen(a, "w");
+                send_msg(sock, "Enter lines (type 'END' to finish):\n");
+                while (1) {
+                    recv_msg(sock, buf);
+                    if (!strcmp(buf, "END")) break;
+                    fprintf(fp, "%s\n", buf);
+                }
+                fclose(fp);
+                send_msg(sock, "WRITE SUCCESSFUL\n");
+            } else {
+                send_msg(sock, "ACCESS DENIED\n");
+            }
+        } 
+        else { //top user
+            if (!strcmp(c, "download")) {
+                FILE *fp = fopen(a, "rb");
+                int n; char b[BUF];
+                if (!fp) { n = -1; send(sock, &n, sizeof(int), 0); }
+                else {
+                    while ((n = fread(b, 1, BUF, fp)) > 0) {
+                        send(sock, &n, sizeof(int), 0);
+                        send(sock, b, n, 0);
+                    }
+                    n = 0; send(sock, &n, sizeof(int), 0);
+                    fclose(fp);
+                }
+            } else if (!strcmp(c, "upload")) {
+                FILE *fp = fopen(a, "wb");
+                int n; char b[BUF];
+                while (1) {
+                    recv(sock, &n, sizeof(int), 0);
+                    if (n <= 0) break;
+                    int t = 0; while (t < n) t += recv(sock, b + t, n - t, 0);
+                    fwrite(b, 1, n, fp);
+                }
+                fclose(fp);
+                send_msg(sock, "UPLOAD SUCCESSFUL\n");
+            } else if (!strcmp(c, "write")) {
+                FILE *fp = fopen(a, "w");
+                send_msg(sock, "Enter lines (type 'END' to finish):\n");
+                while (1) {
+                    recv_msg(sock, buf);
+                    if (!strcmp(buf, "END")) break;
+                    fprintf(fp, "%s\n", buf);
+                }
+                fclose(fp);
+                send_msg(sock, "WRITE SUCCESSFUL\n");
+            } else {
+                
+                char shell_cmd[BUF + 10];
+                snprintf(shell_cmd, sizeof(shell_cmd), "%s 2>&1", cmd);
+                FILE *fp = popen(shell_cmd, "r");
+                if (fp) {
+                    size_t bytes = fread(res, 1, BUF - 1, fp);
+                    if (bytes == 0) strcpy(res, "OK (Command executed)\n");
+                    pclose(fp);
+                } else {
+                    strcpy(res, "Execution Error\n");
+                }
+                send_msg(sock, res);
+            }
+        }
     }
-
-    printf("%s disconnected\n", user);
     close(sock);
     return NULL;
 }
 
-//main
 int main() {
-    int s=socket(AF_INET,SOCK_STREAM,0);
-    int opt=1;
-    setsockopt(s,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt));
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    struct sockaddr_in addr={0};
-    addr.sin_family=AF_INET;
-    addr.sin_port=htons(PORT);
-    addr.sin_addr.s_addr=INADDR_ANY;
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(PORT);
+    a.sin_addr.s_addr = INADDR_ANY;
 
-    bind(s,(struct sockaddr*)&addr,sizeof(addr));
-    listen(s,5);
+    bind(s, (struct sockaddr*)&a, sizeof(a));
+    listen(s, 5);
 
-    printf("Server running on %d\n",PORT);
+    printf("server active on port %d\n", PORT);
+    printf("---------------------------------------------------------------\n");
 
     while (1) {
-        int *c=malloc(sizeof(int));
-        *c=accept(s,NULL,NULL);
-
-        printf("Client connected\n");
-
+        int *c = malloc(sizeof(int));
+        *c = accept(s, NULL, NULL);
+        log_event("NET", "SYSTEM", "ROOT", "New connection established");
         pthread_t t;
-        pthread_create(&t,NULL,client_thread,c);
+        pthread_create(&t, NULL, client_thread, c);
         pthread_detach(t);
     }
+    return 0;
 }
